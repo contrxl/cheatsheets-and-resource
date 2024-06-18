@@ -173,6 +173,7 @@ One way to identify a database version/type is to attempt to inject a provider s
 | Microsoft, MySQL | `SELECT @@version`        |
 | Oracle           | `SELECT * FROM v$version` |
 | PostgreSQL       | `SELECT version()`        |
+
 For example, you could try a `UNION` attack like:
 `' UNION SELECT @@version--`
 
